@@ -52,6 +52,34 @@ C_SEP    = rgb(70,  70,  70)    # dim separator
 C_BRANCH = rgb(130, 130, 130)   # dim branch info
 C_ALERT  = rgb(255, 255, 255)   # white flash for threshold alert
 
+# ── Active-glow color pairs (bright fg + dark tinted bg) ─────────────────────
+def bg_rgb(r, g, b): return f"\033[48;2;{r};{g};{b}m"
+
+# Each metric: (glow_fg, glow_bg) — brighter foreground, dark-tinted background
+GLOW = {
+    'default': (rgb(220, 220, 220), bg_rgb(30,  30,  30 )),
+    '5h':      (rgb(160, 210, 255), bg_rgb(18,  48,  90 )),  # bright blue / deep navy
+    '15h':     (rgb(255, 200, 110), bg_rgb(80,  50,  10 )),  # bright amber / dark gold
+    '7d':      (rgb(210, 175, 255), bg_rgb(45,  22,  90 )),  # bright violet / deep purple
+    'ctx':     (rgb(130, 240, 230), bg_rgb(12,  65,  62 )),  # bright teal / deep teal
+    'warn':    (rgb(255, 210, 100), bg_rgb(75,  48,  8  )),  # amber glow
+    'crit':    (rgb(255, 110, 100), bg_rgb(80,  20,  18 )),  # red glow
+}
+
+# ── Claude mascot (single-line pixel art) ────────────────────────────────────
+# Packs the 2-row pixel art (ears=row0, head=row1) into one terminal row
+# using Unicode half-block chars: ▄ = lower half filled, █ = both halves filled
+# coral fg (#CC7357) on black bg:
+#   col 0,2,4: row0=empty, row1=coral → ▄  (ear gap above, head below)
+#   col 1,3:   row0=coral, row1=coral → █  (ear column, solid coral)
+C_MASCOT    = rgb(204, 115, 87)     # coral — matches the pixel art
+C_MASCOT_BG = bg_rgb(0, 0, 0)      # black bg so ▄ upper-halves are dark
+MASCOT      = f"{C_MASCOT_BG}{C_MASCOT}▄█▄█▄{R}"
+
+# Active mascot: same shape, slightly brightened + bold
+C_MASCOT_ACTIVE = rgb(240, 150, 115)   # warm highlight coral
+MASCOT_ACTIVE   = f"{C_MASCOT_BG}{BOLD}{C_MASCOT_ACTIVE}▄█▄█▄{R}"
+
 SEP   = f"{C_SEP}│{R}"
 BAR_W = 8
 WAVE  = ["░", "▒", "▓", "█", "▓", "▒", "░"]   # 7-char ripple sequence
@@ -218,22 +246,35 @@ idle_frame  = (ms // 2000) % 2    # shimmer toggles every 2 s
 
 REVERSE = "\033[7m"   # reverse-video for alert flash
 
-def render_bar(pct, base_color, alert=False):
+def render_bar(pct, base_color, alert=False, metric_key='default'):
     if pct is None: return ''
     filled = min(BAR_W, BAR_W * pct // 100)
-    color  = C_CRIT if pct >= 85 else (C_WARN if pct >= 60 else base_color)
+
+    if pct >= 85:
+        base_color = C_CRIT
+        glow_key   = 'crit'
+    elif pct >= 60:
+        base_color = C_WARN
+        glow_key   = 'warn'
+    else:
+        glow_key   = metric_key
+
     # Alert flash: invert the entire bar for one render cycle
     if alert:
-        color = f"{REVERSE}{color}"
-    out    = []
+        color = f"{REVERSE}{base_color}"
+        glow_fg, glow_bg = f"{REVERSE}{base_color}", ""
+    else:
+        color = base_color
+        glow_fg, glow_bg = GLOW.get(glow_key, GLOW['default'])
+
+    out = []
     if is_active and not animation_paused:
-        # Full-width traveling wave
+        # Full-width traveling wave with glow: bright fg on dark tinted bg
         for i in range(BAR_W):
             idx = (wave_offset + i) % 7
-            out.append(f"{color}{WAVE[idx]}{R}")
+            out.append(f"{glow_bg}{BOLD}{glow_fg}{WAVE[idx]}{R}")
     else:
-        # Filled + shimmer on last filled char + dim empty
-        # (shimmer frozen when animation_paused to save redraws)
+        # Filled + shimmer on last filled char + dim empty (no glow when idle)
         frame = idle_frame if not animation_paused else 0
         for i in range(BAR_W):
             if i < filled:
@@ -253,8 +294,8 @@ branch_str = f"{C_BRANCH}{directory}/ ({branch}{dirty}){R}" if branch \
 
 S = f" {SEP} "
 
-def metric(label, color, pct, reset, alert=False):
-    b  = render_bar(pct, color, alert=alert)
+def metric(label, color, pct, reset, alert=False, metric_key='default'):
+    b  = render_bar(pct, color, alert=alert, metric_key=metric_key)
     cd = countdown(reset)
     cd_str = f" {DIM}{cd}{R}" if cd else ""
     # Bell character goes to stderr so it doesn't corrupt the status line text
@@ -262,12 +303,14 @@ def metric(label, color, pct, reset, alert=False):
         print("\a", end='', file=sys.stderr)
     return f"{color}{label}{R} {b} {BOLD}{pct}%{R}{cd_str}"
 
-segments = [branch_str]
-segments.append(metric("5h",  C_5H,  fh_pct, fh_reset, alert=fh_alert))
+mascot_str = MASCOT_ACTIVE if is_active else MASCOT
+
+segments = [mascot_str, branch_str]
+segments.append(metric("5h",  C_5H,  fh_pct, fh_reset, alert=fh_alert,  metric_key='5h'))
 if sh_pct is not None:
-    segments.append(metric("15h", C_15H, sh_pct, sh_reset, alert=sh_alert))
-segments.append(metric("7d",  C_7D,  sd_pct, sd_reset, alert=sd_alert))
-segments.append(metric("ctx", C_CTX, ctx_pct, ctx_reset, alert=ctx_alert))
+    segments.append(metric("15h", C_15H, sh_pct, sh_reset, alert=sh_alert, metric_key='15h'))
+segments.append(metric("7d",  C_7D,  sd_pct, sd_reset, alert=sd_alert,  metric_key='7d'))
+segments.append(metric("ctx", C_CTX, ctx_pct, ctx_reset, alert=ctx_alert, metric_key='ctx'))
 segments.append(f"{BOLD}{mdisplay}{R} {DIM}{time_str}{R}")
 
 print(S.join(segments))
