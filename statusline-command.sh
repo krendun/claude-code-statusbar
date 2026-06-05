@@ -50,8 +50,7 @@ C_WARN   = rgb(232, 160, 69)    # amber warning  (60–85%)
 C_CRIT   = rgb(204, 68,  68)    # muted red      (85–100%)
 C_SEP    = rgb(70,  70,  70)    # dim separator
 C_BRANCH = rgb(130, 130, 130)   # dim branch info
-sed -i '' '48a\
-case "$ms" in '"'"''|*[!0-9]*) ms=$(( now * 1000 )) ;; esac' ~/.claude/statusline-command.sh
+C_ALERT  = rgb(255, 255, 255)   # white flash for threshold alert
 
 SEP   = f"{C_SEP}│{R}"
 BAR_W = 8
@@ -131,6 +130,58 @@ try:
 except Exception:
     pass
 
+# ── Threshold alert (bell + reverse-flash) ────────────────────────────────────
+# Fires once per metric per crossing of ALERT_PCT. A cooldown file per metric
+# suppresses repeat firings until the metric drops back below RESET_PCT.
+ALERT_PCT = 90    # ring bell + flash when metric hits this
+RESET_PCT = 85    # cooldown clears once metric falls back below this
+
+def maybe_alert(name, pct):
+    """Return True if this render should flash (and fire the bell)."""
+    if pct is None:
+        return False
+    flag = f'/tmp/cc-alerted-{name}'
+    already_alerted = os.path.exists(flag)
+    if pct >= ALERT_PCT and not already_alerted:
+        try:
+            open(flag, 'w').close()           # set cooldown
+        except Exception:
+            pass
+        return True                           # flash + bell this render
+    if pct < RESET_PCT and already_alerted:
+        try:
+            os.remove(flag)                   # reset cooldown for next crossing
+        except Exception:
+            pass
+    return False
+
+fh_alert  = maybe_alert('5h',  fh_pct)
+sh_alert  = maybe_alert('15h', sh_pct) if sh_pct is not None else False
+sd_alert  = maybe_alert('7d',  sd_pct)
+ctx_alert = maybe_alert('ctx', ctx_pct)
+
+any_alert = fh_alert or sh_alert or sd_alert or ctx_alert
+
+# ── Idle-inactivity pause ─────────────────────────────────────────────────────
+# When Claude is idle AND the terminal hasn't been touched for IDLE_PAUSE_SECS,
+# skip the wave calc and emit a static bar. Saves redraws when you've stepped
+# away. The wave resumes instantly on any active-mode trigger.
+IDLE_PAUSE_SECS = 30
+LAST_ACTIVE_FILE = '/tmp/statusline-last-active'
+
+if is_active:
+    try:
+        with open(LAST_ACTIVE_FILE, 'w') as f: f.write(str(ms))
+    except Exception:
+        pass
+    animation_paused = False
+else:
+    try:
+        last_active_ms = int(open(LAST_ACTIVE_FILE).read().strip())
+        animation_paused = (ms - last_active_ms) > (IDLE_PAUSE_SECS * 1000)
+    except Exception:
+        animation_paused = False   # no file yet → not paused
+
 # ── Model display name ────────────────────────────────────────────────────────
 model = str(data.get('model') or data.get('modelName') or data.get('model_name') or '')
 ml = model.lower()
@@ -165,21 +216,28 @@ def countdown(reset_ts):
 wave_offset = (ms // 250) % 7     # wave advances every 250 ms
 idle_frame  = (ms // 2000) % 2    # shimmer toggles every 2 s
 
-def render_bar(pct, base_color):
+REVERSE = "\033[7m"   # reverse-video for alert flash
+
+def render_bar(pct, base_color, alert=False):
     if pct is None: return ''
     filled = min(BAR_W, BAR_W * pct // 100)
     color  = C_CRIT if pct >= 85 else (C_WARN if pct >= 60 else base_color)
+    # Alert flash: invert the entire bar for one render cycle
+    if alert:
+        color = f"{REVERSE}{color}"
     out    = []
-    if is_active:
+    if is_active and not animation_paused:
         # Full-width traveling wave
         for i in range(BAR_W):
             idx = (wave_offset + i) % 7
             out.append(f"{color}{WAVE[idx]}{R}")
     else:
         # Filled + shimmer on last filled char + dim empty
+        # (shimmer frozen when animation_paused to save redraws)
+        frame = idle_frame if not animation_paused else 0
         for i in range(BAR_W):
             if i < filled:
-                ch = ("█" if idle_frame == 0 else "▓") if i == filled - 1 else "█"
+                ch = ("█" if frame == 0 else "▓") if i == filled - 1 else "█"
                 out.append(f"{color}{ch}{R}")
             else:
                 out.append(f"{DIM}░{R}")
@@ -195,18 +253,21 @@ branch_str = f"{C_BRANCH}{directory}/ ({branch}{dirty}){R}" if branch \
 
 S = f" {SEP} "
 
-def metric(label, color, pct, reset):
-    b  = render_bar(pct, color)
+def metric(label, color, pct, reset, alert=False):
+    b  = render_bar(pct, color, alert=alert)
     cd = countdown(reset)
     cd_str = f" {DIM}{cd}{R}" if cd else ""
+    # Bell character goes to stderr so it doesn't corrupt the status line text
+    if alert:
+        print("\a", end='', file=sys.stderr)
     return f"{color}{label}{R} {b} {BOLD}{pct}%{R}{cd_str}"
 
 segments = [branch_str]
-segments.append(metric("5h",  C_5H,  fh_pct, fh_reset))
+segments.append(metric("5h",  C_5H,  fh_pct, fh_reset, alert=fh_alert))
 if sh_pct is not None:
-    segments.append(metric("15h", C_15H, sh_pct, sh_reset))
-segments.append(metric("7d",  C_7D,  sd_pct, sd_reset))
-segments.append(metric("ctx", C_CTX, ctx_pct, ctx_reset))
+    segments.append(metric("15h", C_15H, sh_pct, sh_reset, alert=sh_alert))
+segments.append(metric("7d",  C_7D,  sd_pct, sd_reset, alert=sd_alert))
+segments.append(metric("ctx", C_CTX, ctx_pct, ctx_reset, alert=ctx_alert))
 segments.append(f"{BOLD}{mdisplay}{R} {DIM}{time_str}{R}")
 
 print(S.join(segments))
