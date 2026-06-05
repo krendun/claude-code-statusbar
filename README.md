@@ -4,8 +4,9 @@ A Claude Code status bar with per-metric colors, usage thresholds, dual
 animation modes, and a live countdown to rate-limit reset. Built entirely 
 with Claude Code prompts — no manual shell scripting required.
 
-> Add your screenshot here — capture it mid-response so the active wave 
-> animation is visible.
+![Status bar display](display.png)
+
+![Animation demo](demonstration.gif)
 
 ---
 
